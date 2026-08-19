@@ -86,16 +86,13 @@ class PaddleOcrEngine:
             
             logger.info("Loading PaddleOCR with Arabic model...")
             
-            # Use Arabic language model
-            # PP-OCRv5 or latest available Arabic model
+            # Use Arabic language model with updated PaddleOCR v3.x API
+            # Parameters have been updated in newer versions
             self._ocr_system = PaddleOCR(
-                use_angle_cls=OCR_CONFIG.PADDLE_USE_ANGLE_CLS,
                 lang=OCR_CONFIG.PADDLE_LANG,  # 'ar' for Arabic
-                det_db_thresh=OCR_CONFIG.PADDLE_DET_DB_THRESH,
-                det_box_thresh=OCR_CONFIG.PADDLE_DET_BOX_THRESH,
-                rec_batch_num=OCR_CONFIG.PADDLE_REC_BATCH_NUM,
-                show_log=False,
-                use_gpu=False  # Will be set based on availability
+                text_det_thresh=OCR_CONFIG.PADDLE_DET_DB_THRESH,
+                text_det_box_thresh=OCR_CONFIG.PADDLE_DET_BOX_THRESH,
+                text_recognition_batch_size=OCR_CONFIG.PADDLE_REC_BATCH_NUM
             )
             
             logger.info("PaddleOCR loaded successfully")
@@ -127,8 +124,8 @@ class PaddleOcrEngine:
                 # Grayscale - convert to BGR for PaddleOCR
                 image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
             
-            # Run OCR
-            result = self._ocr_system.ocr(image, cls=OCR_CONFIG.PADDLE_USE_ANGLE_CLS)
+            # Run OCR - updated API for PaddleOCR v3.x
+            result = self._ocr_system.ocr(image)
             
             # Parse results
             parsed_results = []
