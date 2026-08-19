@@ -284,6 +284,16 @@ def _detect_by_threshold(gray: np.ndarray, image_area: float, height: int, width
     
     Useful for low-contrast images where edge detection fails.
     """
+    # FIRST: Check if image aspect ratio matches ID card - if so, use full image immediately
+    # This handles screenshots/crops where the entire image IS the card
+    actual_ar = width / float(height) if height > 0 else 0
+    expected_ar = DETECTION_CONFIG.EXPECTED_ASPECT_RATIO
+    
+    # If aspect ratio is within 25% of expected, just use full image
+    if abs(actual_ar - expected_ar) / expected_ar < 0.25:
+        logger.info(f"Image aspect ratio {actual_ar:.2f} matches ID card ({expected_ar:.2f}), using full image")
+        return _detect_full_image_as_card(height, width)
+    
     # Apply Otsu's thresholding
     _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     
@@ -346,6 +356,7 @@ def _detect_by_threshold(gray: np.ndarray, image_area: float, height: int, width
                 )
     
     # No good contour found, use full image
+    logger.info(f"No suitable contour found in threshold detection, using full image fallback")
     return _detect_full_image_as_card(height, width)
 
 
