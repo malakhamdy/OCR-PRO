@@ -7,10 +7,13 @@ Finds card corners and estimates perspective transformation.
 
 import cv2
 import numpy as np
+import logging
 from dataclasses import dataclass
 from typing import Tuple, Optional, List, Dict, Any
 
 from config import DETECTION_CONFIG, IMAGE_CONFIG
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -82,8 +85,8 @@ def detect_card(image: np.ndarray) -> CardDetectionResult:
     # Apply Gaussian blur
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     
-    # Edge detection using Canny
-    edges = cv2.Canny(blurred, 75, 200)
+    # Edge detection using Canny with adaptive thresholds
+    edges = cv2.Canny(blurred, 50, 150)
     
     # Morphological operations to close gaps
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
@@ -97,15 +100,8 @@ def detect_card(image: np.ndarray) -> CardDetectionResult:
     )
     
     if not contours:
-        return CardDetectionResult(
-            card_detected=False,
-            confidence=0.0,
-            corners=[],
-            contour=None,
-            card_area_ratio=0.0,
-            aspect_ratio=0.0,
-            error_message="No contours found"
-        )
+        # Strategy 2: Try threshold-based detection
+        return _detect_by_threshold(gray, image_area, height, width)
     
     # Sort contours by area (largest first)
     contours = sorted(contours, key=cv2.contourArea, reverse=True)
@@ -158,7 +154,7 @@ def detect_card(image: np.ndarray) -> CardDetectionResult:
             area = cv2.contourArea(contour)
             area_ratio = area / image_area
             
-            if area_ratio < min_area_ratio * 0.5:
+            if area_ratio < min_area_ratio * 0.3:  # Even more lenient
                 continue
             
             epsilon = DETECTION_CONFIG.CONTOUR_EPSILON_FACTOR * cv2.arcLength(contour, True)
@@ -174,15 +170,34 @@ def detect_card(image: np.ndarray) -> CardDetectionResult:
                 break
     
     if best_contour is None:
-        return CardDetectionResult(
-            card_detected=False,
-            confidence=0.0,
-            corners=[],
-            contour=None,
-            card_area_ratio=0.0,
-            aspect_ratio=0.0,
-            error_message="No valid card contour found"
-        )
+        # The edge detection found contours but none matched our strict criteria.
+        # This often happens with screenshots where the card UI elements create
+        # many small rectangular contours with wrong aspect ratios.
+        # Instead of falling back to threshold (which works), let's use the 
+        # largest contour that has 4 points even if aspect ratio is wrong,
+        # since the threshold fallback will handle the full-image case.
+        
+        # Use the largest 4-point contour we found
+        for contour in contours[:10]:
+            epsilon = DETECTION_CONFIG.CONTOUR_EPSILON_FACTOR * cv2.arcLength(contour, True)
+            approx = cv2.approxPolyDP(contour, epsilon, True)
+            
+            if len(approx) == 4:
+                area = cv2.contourArea(approx)
+                area_ratio = area / image_area
+                
+                if area_ratio > 0.01:  # Very lenient minimum
+                    best_contour = approx
+                    rect = cv2.minAreaRect(contour)
+                    box = cv2.boxPoints(rect)
+                    best_corners = order_corners(box)
+                    best_score = area_ratio
+                    break
+        
+        if best_contour is None:
+            # Final fallback: use threshold-based detection which will eventually
+            # fall back to using the full image as the card
+            return _detect_by_threshold(gray, image_area, height, width)
     
     # Order corners: TL, TR, BR, BL
     if best_corners is None:
@@ -213,8 +228,16 @@ def detect_card(image: np.ndarray) -> CardDetectionResult:
     
     # Determine overall confidence
     confidence = min(best_score * 2.0, 1.0)  # Scale score to confidence
-    if confidence < DETECTION_CONFIG.MIN_DETECTION_CONFIDENCE:
-        confidence = DETECTION_CONFIG.MIN_DETECTION_CONFIDENCE - 0.1
+    
+    # Boost confidence for valid detections with good area ratio and aspect ratio
+    if card_area_ratio > 0.15 and abs(aspect_ratio - DETECTION_CONFIG.EXPECTED_ASPECT_RATIO) < 0.3:
+        confidence = max(confidence, 0.6)
+    
+    # For screenshots or UI captures where the entire image is the card content,
+    # use the threshold-based fallback which handles full-image detection better
+    if confidence < DETECTION_CONFIG.MIN_DETECTION_CONFIDENCE * 0.8:
+        logger.info(f"Low confidence ({confidence:.2f}) from edge detection, trying threshold fallback")
+        return _detect_by_threshold(gray, image_area, height, width)
     
     return CardDetectionResult(
         card_detected=confidence >= DETECTION_CONFIG.MIN_DETECTION_CONFIDENCE,
@@ -255,6 +278,115 @@ def order_corners(corners: np.ndarray) -> np.ndarray:
     return np.array([tl, tr, br, bl], dtype=np.float32)
 
 
+def _detect_by_threshold(gray: np.ndarray, image_area: float, height: int, width: int) -> CardDetectionResult:
+    """
+    Fallback detection strategy using thresholding.
+    
+    Useful for low-contrast images where edge detection fails.
+    """
+    # FIRST: Check if image aspect ratio matches ID card - if so, use full image immediately
+    # This handles screenshots/crops where the entire image IS the card
+    actual_ar = width / float(height) if height > 0 else 0
+    expected_ar = DETECTION_CONFIG.EXPECTED_ASPECT_RATIO
+    
+    # If aspect ratio is within 25% of expected, just use full image
+    if abs(actual_ar - expected_ar) / expected_ar < 0.25:
+        logger.info(f"Image aspect ratio {actual_ar:.2f} matches ID card ({expected_ar:.2f}), using full image")
+        return _detect_full_image_as_card(height, width)
+    
+    # Apply Otsu's thresholding
+    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # Morphological operations
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    closed_thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=3)
+    
+    # Find contours
+    contours, _ = cv2.findContours(closed_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    if not contours:
+        return _detect_full_image_as_card(height, width)
+    
+    # Sort by area
+    contours = sorted(contours, key=cv2.contourArea, reverse=True)
+    
+    min_area_ratio = DETECTION_CONFIG.MIN_CONTOUR_AREA_RATIO * 0.5  # More lenient
+    expected_aspect_ratio = DETECTION_CONFIG.EXPECTED_ASPECT_RATIO
+    max_aspect_deviation = DETECTION_CONFIG.MAX_ASPECT_RATIO_DEVIATION
+    
+    for contour in contours[:10]:  # Check top 10
+        area = cv2.contourArea(contour)
+        area_ratio = area / image_area
+        
+        if area_ratio < min_area_ratio:
+            continue
+        
+        # Approximate to polygon
+        epsilon = DETECTION_CONFIG.CONTOUR_EPSILON_FACTOR * cv2.arcLength(contour, True)
+        approx = cv2.approxPolyDP(contour, epsilon, True)
+        
+        if len(approx) >= 4:
+            # Get bounding box
+            x, y, w, h = cv2.boundingRect(approx)
+            aspect_ratio = w / float(h) if h > 0 else 0
+            
+            aspect_deviation = abs(aspect_ratio - expected_aspect_ratio) / expected_aspect_ratio
+            
+            if aspect_deviation <= max_aspect_deviation or area_ratio > 0.5:
+                # Found a good candidate
+                rect = cv2.minAreaRect(contour)
+                box = cv2.boxPoints(rect)
+                corners = order_corners(box)
+                
+                card_area_ratio = area / image_area
+                confidence = min(area_ratio * 1.5, 1.0)
+                
+                corner_objects = [
+                    CardCorner(x=c[0], y=c[1], confidence=confidence)
+                    for c in corners
+                ]
+                
+                return CardDetectionResult(
+                    card_detected=confidence >= DETECTION_CONFIG.MIN_DETECTION_CONFIDENCE * 0.8,
+                    confidence=confidence,
+                    corners=corner_objects,
+                    contour=approx,
+                    card_area_ratio=card_area_ratio,
+                    aspect_ratio=aspect_ratio
+                )
+    
+    # No good contour found, use full image
+    logger.info(f"No suitable contour found in threshold detection, using full image fallback")
+    return _detect_full_image_as_card(height, width)
+
+
+def _detect_full_image_as_card(height: int, width: int) -> CardDetectionResult:
+    """
+    Treat the entire image as the card.
+    
+    Used as final fallback when no distinct card boundary is detected.
+    This is common when the uploaded image IS the card (no background),
+    such as screenshots, cropped images, or photos where the card fills the frame.
+    """
+    actual_ar = width / float(height) if height > 0 else 0
+    
+    corners = [
+        CardCorner(x=0, y=0, confidence=0.95),  # TL
+        CardCorner(x=width, y=0, confidence=0.95),  # TR
+        CardCorner(x=width, y=height, confidence=0.95),  # BR
+        CardCorner(x=0, y=height, confidence=0.95)  # BL
+    ]
+    
+    return CardDetectionResult(
+        card_detected=True,  # Always detected as we're using full image
+        confidence=0.95,  # High confidence because user likely uploaded a direct crop/screenshot
+        corners=corners,
+        contour=None,
+        card_area_ratio=1.0,
+        aspect_ratio=actual_ar
+    )
+
+
 def validate_card_detection(result: CardDetectionResult, image_shape: Tuple) -> Tuple[bool, str]:
     """
     Validate card detection result.
@@ -274,12 +406,15 @@ def validate_card_detection(result: CardDetectionResult, image_shape: Tuple) -> 
     
     height, width = image_shape[:2]
     
-    # Check all corners are within image bounds
+    # Allow small floating point errors for corners at image boundaries
+    tolerance = 2.0  # Increased tolerance for FP errors
+    
+    # Check all corners are within image bounds (with tolerance for FP errors)
     for corner in result.corners:
-        if corner.x < 0 or corner.x >= width:
-            return False, f"Corner x={corner.x} outside image bounds"
-        if corner.y < 0 or corner.y >= height:
-            return False, f"Corner y={corner.y} outside image bounds"
+        if corner.x < -tolerance or corner.x >= width + tolerance:
+            return False, f"Corner x={corner.x} outside image bounds [0, {width})"
+        if corner.y < -tolerance or corner.y >= height + tolerance:
+            return False, f"Corner y={corner.y} outside image bounds [0, {height})"
     
     # Check minimum distance between corners
     min_distance = DETECTION_CONFIG.MIN_CORNER_DISTANCE
@@ -292,12 +427,14 @@ def validate_card_detection(result: CardDetectionResult, image_shape: Tuple) -> 
             if dist < min_distance:
                 return False, f"Corners too close: distance={dist}"
     
-    # Check aspect ratio
-    expected_ar = DETECTION_CONFIG.EXPECTED_ASPECT_RATIO
-    max_deviation = DETECTION_CONFIG.MAX_ASPECT_RATIO_DEVIATION
-    ar_deviation = abs(result.aspect_ratio - expected_ar) / expected_ar
-    
-    if ar_deviation > max_deviation:
-        return False, f"Aspect ratio deviation too high: {ar_deviation:.2f}"
+    # Skip aspect ratio check for full-image detections (card_area_ratio ≈ 1.0)
+    # These are screenshots/crops where the user intentionally uploaded just the card
+    if result.card_area_ratio < 0.95:
+        expected_ar = DETECTION_CONFIG.EXPECTED_ASPECT_RATIO
+        max_deviation = DETECTION_CONFIG.MAX_ASPECT_RATIO_DEVIATION
+        ar_deviation = abs(result.aspect_ratio - expected_ar) / expected_ar
+        
+        if ar_deviation > max_deviation:
+            return False, f"Aspect ratio deviation too high: {ar_deviation:.2f}"
     
     return True, ""

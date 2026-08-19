@@ -68,7 +68,8 @@ def normalize_image(image: np.ndarray) -> ImageNormalizationResult:
     Normalize input image to standardized processing space.
     
     - Preserves aspect ratio
-    - Uses letterboxing/padding when necessary
+    - Uses letterboxing/padding ONLY when necessary for very large images
+    - For small/medium images, keeps original dimensions
     - Records all transformation metadata
     - Does NOT distort the image
     
@@ -92,33 +93,35 @@ def normalize_image(image: np.ndarray) -> ImageNormalizationResult:
     # Calculate scale factor to fit within max dimensions
     scale = min(max_width / original_width, max_height / original_height)
     
-    # Don't upscale if image is already within limits
+    # Only create canvas if image needs to be downsized
+    # For smaller images, keep them at original size to avoid padding issues
     if scale >= 1.0:
-        scale = 1.0
+        # Image fits within max dimensions - use original size
         new_width = original_width
         new_height = original_height
+        processing_canvas = image.copy()
+        padding_x = 0
+        padding_y = 0
     else:
+        # Image needs to be downsized
         new_width = int(original_width * scale)
         new_height = int(original_height * scale)
-    
-    # Resize image if needed
-    if scale < 1.0:
+        
+        # Resize image
         processing_resized = cv2.resize(
             image, 
             (new_width, new_height), 
             interpolation=cv2.INTER_AREA
         )
-    else:
-        processing_resized = image.copy()
-    
-    # Create processing canvas with padding (letterboxing)
-    processing_canvas = np.zeros((max_height, max_width, 3), dtype=np.uint8)
-    
-    # Center the resized image on canvas
-    padding_x = (max_width - new_width) // 2
-    padding_y = (max_height - new_height) // 2
-    
-    processing_canvas[padding_y:padding_y+new_height, padding_x:padding_x+new_width] = processing_resized
+        
+        # Create processing canvas with padding (letterboxing)
+        processing_canvas = np.zeros((max_height, max_width, 3), dtype=np.uint8)
+        
+        # Center the resized image on canvas
+        padding_x = (max_width - new_width) // 2
+        padding_y = (max_height - new_height) // 2
+        
+        processing_canvas[padding_y:padding_y+new_height, padding_x:padding_x+new_width] = processing_resized
     
     # Calculate transformation parameters
     scale_x = new_width / original_width
@@ -128,9 +131,9 @@ def normalize_image(image: np.ndarray) -> ImageNormalizationResult:
     transformation_metadata = {
         'original_size': (original_width, original_height),
         'resized_size': (new_width, new_height),
-        'canvas_size': (max_width, max_height),
+        'canvas_size': (processing_canvas.shape[1], processing_canvas.shape[0]),
         'scale_factor': scale,
-        'padding_applied': True,
+        'padding_applied': padding_x > 0 or padding_y > 0,
         'padding_x': padding_x,
         'padding_y': padding_y,
         'aspect_ratio_preserved': True
@@ -141,8 +144,8 @@ def normalize_image(image: np.ndarray) -> ImageNormalizationResult:
         processing_image=processing_canvas,
         original_width=original_width,
         original_height=original_height,
-        processing_width=max_width,
-        processing_height=max_height,
+        processing_width=processing_canvas.shape[1],
+        processing_height=processing_canvas.shape[0],
         scale_x=scale_x,
         scale_y=scale_y,
         padding_x=padding_x,
