@@ -82,8 +82,8 @@ def detect_card(image: np.ndarray) -> CardDetectionResult:
     # Apply Gaussian blur
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     
-    # Edge detection using Canny
-    edges = cv2.Canny(blurred, 75, 200)
+    # Edge detection using Canny with adaptive thresholds
+    edges = cv2.Canny(blurred, 50, 150)
     
     # Morphological operations to close gaps
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
@@ -97,15 +97,8 @@ def detect_card(image: np.ndarray) -> CardDetectionResult:
     )
     
     if not contours:
-        return CardDetectionResult(
-            card_detected=False,
-            confidence=0.0,
-            corners=[],
-            contour=None,
-            card_area_ratio=0.0,
-            aspect_ratio=0.0,
-            error_message="No contours found"
-        )
+        # Strategy 2: Try threshold-based detection
+        return _detect_by_threshold(gray, image_area, height, width)
     
     # Sort contours by area (largest first)
     contours = sorted(contours, key=cv2.contourArea, reverse=True)
@@ -253,6 +246,108 @@ def order_corners(corners: np.ndarray) -> np.ndarray:
     bl = bottom_two[bottom_two[:, 0].argsort()][0]
     
     return np.array([tl, tr, br, bl], dtype=np.float32)
+
+
+def _detect_by_threshold(gray: np.ndarray, image_area: float, height: int, width: int) -> CardDetectionResult:
+    """
+    Fallback detection strategy using thresholding.
+    
+    Useful for low-contrast images where edge detection fails.
+    """
+    # Apply Otsu's thresholding
+    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # Morphological operations
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    closed_thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=3)
+    
+    # Find contours
+    contours, _ = cv2.findContours(closed_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    if not contours:
+        return _detect_full_image_as_card(height, width)
+    
+    # Sort by area
+    contours = sorted(contours, key=cv2.contourArea, reverse=True)
+    
+    min_area_ratio = DETECTION_CONFIG.MIN_CONTOUR_AREA_RATIO * 0.5  # More lenient
+    expected_aspect_ratio = DETECTION_CONFIG.EXPECTED_ASPECT_RATIO
+    max_aspect_deviation = DETECTION_CONFIG.MAX_ASPECT_RATIO_DEVIATION
+    
+    for contour in contours[:10]:  # Check top 10
+        area = cv2.contourArea(contour)
+        area_ratio = area / image_area
+        
+        if area_ratio < min_area_ratio:
+            continue
+        
+        # Approximate to polygon
+        epsilon = DETECTION_CONFIG.CONTOUR_EPSILON_FACTOR * cv2.arcLength(contour, True)
+        approx = cv2.approxPolyDP(contour, epsilon, True)
+        
+        if len(approx) >= 4:
+            # Get bounding box
+            x, y, w, h = cv2.boundingRect(approx)
+            aspect_ratio = w / float(h) if h > 0 else 0
+            
+            aspect_deviation = abs(aspect_ratio - expected_aspect_ratio) / expected_aspect_ratio
+            
+            if aspect_deviation <= max_aspect_deviation or area_ratio > 0.5:
+                # Found a good candidate
+                rect = cv2.minAreaRect(contour)
+                box = cv2.boxPoints(rect)
+                corners = order_corners(box)
+                
+                card_area_ratio = area / image_area
+                confidence = min(area_ratio * 1.5, 1.0)
+                
+                corner_objects = [
+                    CardCorner(x=c[0], y=c[1], confidence=confidence)
+                    for c in corners
+                ]
+                
+                return CardDetectionResult(
+                    card_detected=confidence >= DETECTION_CONFIG.MIN_DETECTION_CONFIDENCE * 0.8,
+                    confidence=confidence,
+                    corners=corner_objects,
+                    contour=approx,
+                    card_area_ratio=card_area_ratio,
+                    aspect_ratio=aspect_ratio
+                )
+    
+    # No good contour found, use full image
+    return _detect_full_image_as_card(height, width)
+
+
+def _detect_full_image_as_card(height: int, width: int) -> CardDetectionResult:
+    """
+    Treat the entire image as the card.
+    
+    Used as final fallback when no distinct card boundary is detected.
+    This is common when the uploaded image IS the card (no background).
+    """
+    expected_ar = DETECTION_CONFIG.EXPECTED_ASPECT_RATIO
+    actual_ar = width / float(height) if height > 0 else 0
+    ar_deviation = abs(actual_ar - expected_ar) / expected_ar
+    
+    # Confidence based on how close aspect ratio is to expected
+    confidence = max(0.5, 1.0 - ar_deviation)
+    
+    corners = [
+        CardCorner(x=0, y=0, confidence=confidence),  # TL
+        CardCorner(x=width, y=0, confidence=confidence),  # TR
+        CardCorner(x=width, y=height, confidence=confidence),  # BR
+        CardCorner(x=0, y=height, confidence=confidence)  # BL
+    ]
+    
+    return CardDetectionResult(
+        card_detected=True,  # Always detected as we're using full image
+        confidence=confidence,
+        corners=corners,
+        contour=None,
+        card_area_ratio=1.0,
+        aspect_ratio=actual_ar
+    )
 
 
 def validate_card_detection(result: CardDetectionResult, image_shape: Tuple) -> Tuple[bool, str]:

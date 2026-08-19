@@ -1,3 +1,31 @@
-Nothing should be ignored in this case, as the added files are all image files (.jpg) which are not build artifacts, dependencies, or temporary files, and there are no other types of files in the change list that warrant being added to .gitignore.
+```
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
 
-Output: (empty)
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+
+# Environment
+.env
+.env.local
+*.env.*
+
+# Editors
+.vscode/
+.idea/
+
+# Dependencies
+.venv/
+venv/
+node_modules/
+
+# Build artifacts
+dist/
+build/
+target/
+```
