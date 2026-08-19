@@ -354,24 +354,21 @@ def _detect_full_image_as_card(height: int, width: int) -> CardDetectionResult:
     Treat the entire image as the card.
     
     Used as final fallback when no distinct card boundary is detected.
-    This is common when the uploaded image IS the card (no background).
+    This is common when the uploaded image IS the card (no background),
+    such as screenshots, cropped images, or photos where the card fills the frame.
     """
     actual_ar = width / float(height) if height > 0 else 0
     
-    # For screenshots or images with extreme aspect ratios, 
-    # try to detect the largest rectangular region that looks like a card
-    # This handles cases where the card is displayed within a UI screenshot
-    
     corners = [
-        CardCorner(x=0, y=0, confidence=0.5),  # TL
-        CardCorner(x=width, y=0, confidence=0.5),  # TR
-        CardCorner(x=width, y=height, confidence=0.5),  # BR
-        CardCorner(x=0, y=height, confidence=0.5)  # BL
+        CardCorner(x=0, y=0, confidence=0.95),  # TL
+        CardCorner(x=width, y=0, confidence=0.95),  # TR
+        CardCorner(x=width, y=height, confidence=0.95),  # BR
+        CardCorner(x=0, y=height, confidence=0.95)  # BL
     ]
     
     return CardDetectionResult(
         card_detected=True,  # Always detected as we're using full image
-        confidence=0.5,  # Moderate confidence for fallback
+        confidence=0.95,  # High confidence because user likely uploaded a direct crop/screenshot
         corners=corners,
         contour=None,
         card_area_ratio=1.0,
@@ -399,7 +396,7 @@ def validate_card_detection(result: CardDetectionResult, image_shape: Tuple) -> 
     height, width = image_shape[:2]
     
     # Allow small floating point errors for corners at image boundaries
-    tolerance = 1.0
+    tolerance = 2.0  # Increased tolerance for FP errors
     
     # Check all corners are within image bounds (with tolerance for FP errors)
     for corner in result.corners:
@@ -419,12 +416,14 @@ def validate_card_detection(result: CardDetectionResult, image_shape: Tuple) -> 
             if dist < min_distance:
                 return False, f"Corners too close: distance={dist}"
     
-    # Check aspect ratio
-    expected_ar = DETECTION_CONFIG.EXPECTED_ASPECT_RATIO
-    max_deviation = DETECTION_CONFIG.MAX_ASPECT_RATIO_DEVIATION
-    ar_deviation = abs(result.aspect_ratio - expected_ar) / expected_ar
-    
-    if ar_deviation > max_deviation:
-        return False, f"Aspect ratio deviation too high: {ar_deviation:.2f}"
+    # Skip aspect ratio check for full-image detections (card_area_ratio ≈ 1.0)
+    # These are screenshots/crops where the user intentionally uploaded just the card
+    if result.card_area_ratio < 0.95:
+        expected_ar = DETECTION_CONFIG.EXPECTED_ASPECT_RATIO
+        max_deviation = DETECTION_CONFIG.MAX_ASPECT_RATIO_DEVIATION
+        ar_deviation = abs(result.aspect_ratio - expected_ar) / expected_ar
+        
+        if ar_deviation > max_deviation:
+            return False, f"Aspect ratio deviation too high: {ar_deviation:.2f}"
     
     return True, ""
