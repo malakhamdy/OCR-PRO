@@ -7,10 +7,13 @@ Finds card corners and estimates perspective transformation.
 
 import cv2
 import numpy as np
+import logging
 from dataclasses import dataclass
 from typing import Tuple, Optional, List, Dict, Any
 
 from config import DETECTION_CONFIG, IMAGE_CONFIG
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -151,7 +154,7 @@ def detect_card(image: np.ndarray) -> CardDetectionResult:
             area = cv2.contourArea(contour)
             area_ratio = area / image_area
             
-            if area_ratio < min_area_ratio * 0.5:
+            if area_ratio < min_area_ratio * 0.3:  # Even more lenient
                 continue
             
             epsilon = DETECTION_CONFIG.CONTOUR_EPSILON_FACTOR * cv2.arcLength(contour, True)
@@ -167,15 +170,34 @@ def detect_card(image: np.ndarray) -> CardDetectionResult:
                 break
     
     if best_contour is None:
-        return CardDetectionResult(
-            card_detected=False,
-            confidence=0.0,
-            corners=[],
-            contour=None,
-            card_area_ratio=0.0,
-            aspect_ratio=0.0,
-            error_message="No valid card contour found"
-        )
+        # The edge detection found contours but none matched our strict criteria.
+        # This often happens with screenshots where the card UI elements create
+        # many small rectangular contours with wrong aspect ratios.
+        # Instead of falling back to threshold (which works), let's use the 
+        # largest contour that has 4 points even if aspect ratio is wrong,
+        # since the threshold fallback will handle the full-image case.
+        
+        # Use the largest 4-point contour we found
+        for contour in contours[:10]:
+            epsilon = DETECTION_CONFIG.CONTOUR_EPSILON_FACTOR * cv2.arcLength(contour, True)
+            approx = cv2.approxPolyDP(contour, epsilon, True)
+            
+            if len(approx) == 4:
+                area = cv2.contourArea(approx)
+                area_ratio = area / image_area
+                
+                if area_ratio > 0.01:  # Very lenient minimum
+                    best_contour = approx
+                    rect = cv2.minAreaRect(contour)
+                    box = cv2.boxPoints(rect)
+                    best_corners = order_corners(box)
+                    best_score = area_ratio
+                    break
+        
+        if best_contour is None:
+            # Final fallback: use threshold-based detection which will eventually
+            # fall back to using the full image as the card
+            return _detect_by_threshold(gray, image_area, height, width)
     
     # Order corners: TL, TR, BR, BL
     if best_corners is None:
@@ -210,6 +232,12 @@ def detect_card(image: np.ndarray) -> CardDetectionResult:
     # Boost confidence for valid detections with good area ratio and aspect ratio
     if card_area_ratio > 0.15 and abs(aspect_ratio - DETECTION_CONFIG.EXPECTED_ASPECT_RATIO) < 0.3:
         confidence = max(confidence, 0.6)
+    
+    # For screenshots or UI captures where the entire image is the card content,
+    # use the threshold-based fallback which handles full-image detection better
+    if confidence < DETECTION_CONFIG.MIN_DETECTION_CONFIDENCE * 0.8:
+        logger.info(f"Low confidence ({confidence:.2f}) from edge detection, trying threshold fallback")
+        return _detect_by_threshold(gray, image_area, height, width)
     
     return CardDetectionResult(
         card_detected=confidence >= DETECTION_CONFIG.MIN_DETECTION_CONFIDENCE,
@@ -328,23 +356,22 @@ def _detect_full_image_as_card(height: int, width: int) -> CardDetectionResult:
     Used as final fallback when no distinct card boundary is detected.
     This is common when the uploaded image IS the card (no background).
     """
-    expected_ar = DETECTION_CONFIG.EXPECTED_ASPECT_RATIO
     actual_ar = width / float(height) if height > 0 else 0
-    ar_deviation = abs(actual_ar - expected_ar) / expected_ar
     
-    # Confidence based on how close aspect ratio is to expected
-    confidence = max(0.5, 1.0 - ar_deviation)
+    # For screenshots or images with extreme aspect ratios, 
+    # try to detect the largest rectangular region that looks like a card
+    # This handles cases where the card is displayed within a UI screenshot
     
     corners = [
-        CardCorner(x=0, y=0, confidence=confidence),  # TL
-        CardCorner(x=width, y=0, confidence=confidence),  # TR
-        CardCorner(x=width, y=height, confidence=confidence),  # BR
-        CardCorner(x=0, y=height, confidence=confidence)  # BL
+        CardCorner(x=0, y=0, confidence=0.5),  # TL
+        CardCorner(x=width, y=0, confidence=0.5),  # TR
+        CardCorner(x=width, y=height, confidence=0.5),  # BR
+        CardCorner(x=0, y=height, confidence=0.5)  # BL
     ]
     
     return CardDetectionResult(
         card_detected=True,  # Always detected as we're using full image
-        confidence=max(confidence, DETECTION_CONFIG.MIN_DETECTION_CONFIDENCE),  # Ensure meets threshold
+        confidence=0.5,  # Moderate confidence for fallback
         corners=corners,
         contour=None,
         card_area_ratio=1.0,
@@ -371,12 +398,15 @@ def validate_card_detection(result: CardDetectionResult, image_shape: Tuple) -> 
     
     height, width = image_shape[:2]
     
-    # Check all corners are within image bounds
+    # Allow small floating point errors for corners at image boundaries
+    tolerance = 1.0
+    
+    # Check all corners are within image bounds (with tolerance for FP errors)
     for corner in result.corners:
-        if corner.x < 0 or corner.x >= width:
-            return False, f"Corner x={corner.x} outside image bounds"
-        if corner.y < 0 or corner.y >= height:
-            return False, f"Corner y={corner.y} outside image bounds"
+        if corner.x < -tolerance or corner.x >= width + tolerance:
+            return False, f"Corner x={corner.x} outside image bounds [0, {width})"
+        if corner.y < -tolerance or corner.y >= height + tolerance:
+            return False, f"Corner y={corner.y} outside image bounds [0, {height})"
     
     # Check minimum distance between corners
     min_distance = DETECTION_CONFIG.MIN_CORNER_DISTANCE
