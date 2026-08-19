@@ -41,7 +41,7 @@ class DetectionConfig:
     EXPECTED_ASPECT_RATIO: float = 1.587  # Standard ID-1 card ratio (85.6/54)
     
     # Confidence thresholds
-    MIN_DETECTION_CONFIDENCE: float = 0.7
+    MIN_DETECTION_CONFIDENCE: float = 0.5
 
 
 @dataclass

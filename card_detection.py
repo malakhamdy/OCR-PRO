@@ -206,8 +206,10 @@ def detect_card(image: np.ndarray) -> CardDetectionResult:
     
     # Determine overall confidence
     confidence = min(best_score * 2.0, 1.0)  # Scale score to confidence
-    if confidence < DETECTION_CONFIG.MIN_DETECTION_CONFIDENCE:
-        confidence = DETECTION_CONFIG.MIN_DETECTION_CONFIDENCE - 0.1
+    
+    # Boost confidence for valid detections with good area ratio and aspect ratio
+    if card_area_ratio > 0.15 and abs(aspect_ratio - DETECTION_CONFIG.EXPECTED_ASPECT_RATIO) < 0.3:
+        confidence = max(confidence, 0.6)
     
     return CardDetectionResult(
         card_detected=confidence >= DETECTION_CONFIG.MIN_DETECTION_CONFIDENCE,
@@ -342,7 +344,7 @@ def _detect_full_image_as_card(height: int, width: int) -> CardDetectionResult:
     
     return CardDetectionResult(
         card_detected=True,  # Always detected as we're using full image
-        confidence=confidence,
+        confidence=max(confidence, DETECTION_CONFIG.MIN_DETECTION_CONFIDENCE),  # Ensure meets threshold
         corners=corners,
         contour=None,
         card_area_ratio=1.0,
