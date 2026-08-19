@@ -7,6 +7,7 @@ Orchestrates the complete document understanding workflow.
 
 import cv2
 import numpy as np
+import os
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 import logging
@@ -96,7 +97,7 @@ class EgyptianIDPipeline:
         Process Egyptian National ID image through complete pipeline.
         
         Args:
-            image: Input image (BGR format)
+            image: Input image (BGR format) or path to image file
             
         Returns:
             PipelineResult with all extracted information
@@ -106,6 +107,30 @@ class EgyptianIDPipeline:
         derived_info = {}
         
         try:
+            # Handle string paths - load the image
+            if isinstance(image, str):
+                if not os.path.exists(image):
+                    return PipelineResult(
+                        success=False,
+                        document_info={},
+                        fields={},
+                        derived_info={},
+                        cross_validation=None,
+                        debug_info=debug_info,
+                        error_message=f"Image file not found: {image}"
+                    )
+                image = cv2.imread(image)
+                if image is None:
+                    return PipelineResult(
+                        success=False,
+                        document_info={},
+                        fields={},
+                        derived_info={},
+                        cross_validation=None,
+                        debug_info=debug_info,
+                        error_message=f"Failed to load image: {image}"
+                    )
+            
             # ========== STEP 1: Image Normalization ==========
             logger.info("Step 1: Image normalization")
             norm_result = normalize_image(image)
